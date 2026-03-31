@@ -18,11 +18,8 @@ const LIVEKIT_URL = process.env.LIVEKIT_URL;
 export const revalidate = 0;
 
 export async function POST(req: Request) {
-  if (process.env.NODE_ENV !== 'development') {
-    throw new Error(
-      'THIS API ROUTE IS INSECURE. DO NOT USE THIS ROUTE IN PRODUCTION WITHOUT AN AUTHENTICATION LAYER.'
-    );
-  }
+  // Removed the NODE_ENV development check so the app can be shared via Vercel.
+  // Note: In a real commercial application, you'd want to add an auth check here.
 
   try {
     if (LIVEKIT_URL === undefined) {
