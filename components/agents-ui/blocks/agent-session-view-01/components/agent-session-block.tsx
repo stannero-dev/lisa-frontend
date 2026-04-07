@@ -2,6 +2,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, type MotionProps, motion } from 'motion/react';
+import type { ReceivedMessage } from '@livekit/components-react';
 import { useAgent, useSessionContext, useSessionMessages } from '@livekit/components-react';
 import { AgentChatTranscript } from '@/components/agents-ui/agent-chat-transcript';
 import {
@@ -13,6 +14,65 @@ import { cn } from '@/lib/shadcn/utils';
 import { TileLayout } from './tile-view';
 
 const MotionMessage = motion.create(Shimmer);
+const AGENT_SEND_MESSAGE_RPC = 'lk.agent.send_message';
+
+type AgentRpcResponseItem = {
+  id?: string;
+  type?: string;
+  role?: string;
+  content?: unknown;
+  created_at?: number;
+};
+
+type AgentRpcSendMessageResponse = {
+  items?: AgentRpcResponseItem[];
+};
+
+type ManualChatMessage = Extract<ReceivedMessage, { type?: 'chatMessage' }>;
+
+function normalizeTimestamp(timestamp?: number) {
+  if (!timestamp) {
+    return Date.now();
+  }
+
+  return timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+}
+
+function getAssistantText(item: AgentRpcResponseItem) {
+  if (item.type !== 'message' || item.role !== 'assistant' || !Array.isArray(item.content)) {
+    return null;
+  }
+
+  const text = item.content.filter((part): part is string => typeof part === 'string').join('\n').trim();
+  return text.length > 0 ? text : null;
+}
+
+function mergeTranscriptMessages(
+  sessionMessages: ReceivedMessage[],
+  manualMessages: ReceivedMessage[],
+) {
+  const merged = [...sessionMessages, ...manualMessages].sort((a, b) => a.timestamp - b.timestamp);
+  const deduped: ReceivedMessage[] = [];
+
+  for (const message of merged) {
+    const normalizedText = message.message.trim().replace(/\s+/g, ' ');
+    const isDuplicateAssistantMessage =
+      !message.from?.isLocal &&
+      normalizedText.length > 0 &&
+      deduped.some(
+        (existing) =>
+          !existing.from?.isLocal &&
+          existing.message.trim().replace(/\s+/g, ' ') === normalizedText &&
+          Math.abs(existing.timestamp - message.timestamp) < 10_000,
+      );
+
+    if (!isDuplicateAssistantMessage) {
+      deduped.push(message);
+    }
+  }
+
+  return deduped;
+}
 
 const BOTTOM_VIEW_MOTION_PROPS: MotionProps = {
   variants: {
@@ -176,10 +236,16 @@ export function AgentSessionView_01({
   ...props
 }: React.ComponentProps<'section'> & AgentSessionView_01Props) {
   const session = useSessionContext();
-  const { messages } = useSessionMessages(session);
+  const { messages: sessionMessages } = useSessionMessages(session);
   const [chatOpen, setChatOpen] = useState(false);
+  const [manualMessages, setManualMessages] = useState<ReceivedMessage[]>([]);
   const scrollAreaRef = useRef<HTMLDivElement>(null);
-  const { state: agentState } = useAgent();
+  const agent = useAgent();
+  const { state: agentState } = agent;
+  const messages = React.useMemo(
+    () => mergeTranscriptMessages(sessionMessages, manualMessages),
+    [sessionMessages, manualMessages],
+  );
 
   const controls: AgentControlBarControls = {
     leave: true,
@@ -187,6 +253,62 @@ export function AgentSessionView_01({
     chat: supportsChatInput,
     camera: supportsVideoInput,
     screenShare: supportsScreenShare,
+  };
+
+  const handleSendMessage = async (message: string) => {
+    const agentIdentity = agent.internal.agentParticipant?.identity;
+    if (!agentIdentity) {
+      throw new Error('Agent is not connected yet.');
+    }
+
+    const optimisticUserMessage: ReceivedMessage = {
+      id: `typed-user-${crypto.randomUUID()}`,
+      timestamp: Date.now(),
+      type: 'chatMessage',
+      message,
+      from: session.room.localParticipant,
+    };
+
+    setManualMessages((current) => [...current, optimisticUserMessage]);
+
+    try {
+      const rawResponse = await session.room.localParticipant.performRpc({
+        destinationIdentity: agentIdentity,
+        method: AGENT_SEND_MESSAGE_RPC,
+        payload: JSON.stringify({ text: message }),
+        responseTimeout: 60_000,
+      });
+
+      const parsedResponse = JSON.parse(rawResponse) as AgentRpcSendMessageResponse;
+      const assistantMessages = (parsedResponse.items ?? []).reduce<ManualChatMessage[]>(
+        (messages, item) => {
+          const text = getAssistantText(item);
+          if (!text) {
+            return messages;
+          }
+
+          messages.push({
+            id: item.id ?? `typed-assistant-${crypto.randomUUID()}`,
+            timestamp: normalizeTimestamp(item.created_at),
+            type: 'chatMessage',
+            message: text,
+            from: agent.internal.agentParticipant ?? undefined,
+          });
+
+          return messages;
+        },
+        [],
+      );
+
+      if (assistantMessages.length > 0) {
+        setManualMessages((current) => [...current, ...assistantMessages]);
+      }
+    } catch (error) {
+      setManualMessages((current) =>
+        current.filter((currentMessage) => currentMessage.id !== optimisticUserMessage.id),
+      );
+      throw error;
+    }
   };
 
   useEffect(() => {
@@ -266,6 +388,7 @@ export function AgentSessionView_01({
             isConnected={session.isConnected}
             onDisconnect={session.end}
             onIsChatOpenChange={setChatOpen}
+            onSendMessage={handleSendMessage}
           />
         </div>
       </motion.div>

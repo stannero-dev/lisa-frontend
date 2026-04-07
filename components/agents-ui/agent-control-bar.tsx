@@ -211,6 +211,8 @@ export interface AgentControlBarProps extends UseInputControlsProps {
   onDisconnect?: () => void;
   /** The callback for when the chat is opened or closed. */
   onIsChatOpenChange?: (open: boolean) => void;
+  /** Optional override for how typed chat messages are sent. */
+  onSendMessage?: (message: string) => Promise<void>;
   /** The callback for when a device error occurs. */
   onDeviceError?: (error: { source: Track.Source; error: Error }) => void;
 }
@@ -248,6 +250,7 @@ export function AgentControlBar({
   onDisconnect,
   onDeviceError,
   onIsChatOpenChange,
+  onSendMessage,
   className,
   ...props
 }: AgentControlBarProps & ComponentProps<'div'>) {
@@ -266,6 +269,11 @@ export function AgentControlBar({
   } = useInputControls({ onDeviceError, saveUserChoices });
 
   const handleSendMessage = async (message: string) => {
+    if (onSendMessage) {
+      await onSendMessage(message);
+      return;
+    }
+
     await send(message);
   };
 
